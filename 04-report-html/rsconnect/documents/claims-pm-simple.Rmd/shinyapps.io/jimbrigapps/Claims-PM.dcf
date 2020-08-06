@@ -1,0 +1,13 @@
+name: Claims-PM
+title: Claims-PM
+username:
+account: jimbrigapps
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 2620514
+bundleId: 3446561
+url: https://jimbrigapps.shinyapps.io/Claims-PM/
+when: 1595953985.11791
+asMultiple: FALSE
+asStatic: FALSE
+additionalFiles: claims-pm-simple_files/figure-html/zm_plots-1.png|claims-pm-simple_files/figure-html/unnamed-chunk-4-1.png|claims-pm-simple_files/figure-html/sim_v_actual-1.png|claims-pm-simple_files/figure-html/cm_logit_plot-1.png

@@ -1,0 +1,69 @@
+\NeedsTeXFormat{LaTeX2e}[1994/06/01]
+\ProvidesPackage{owreport}[2016/03/16 owreportmemo Package]
+% this package includes all packages and options necessary to make
+% the most basic example of our ow-report template.  Every command
+% in this package is necessary to for the temaplat to render correctly.
+% all package and setting commands specific to a particular report should
+% be included in the report rather than in this package
+\usepackage[T1]{fontenc} %Andy: font setting
+\usepackage{parskip} %Andy: handles paragraph indentation
+\usepackage[scaled]{uarial} %Andy: font formatting
+\usepackage{titlesec} %Andy: allows for section line and color formatting
+\usepackage{graphicx} %Andy: allows for .png with the \includegraphics[]{} command
+\usepackage{geometry} %Andy: reset page dimensions with \newgeometry{}
+\usepackage{fancyhdr} %Andy: nicer header and footers
+
+
+
+\ProcessOptions\relax %Andy: definitely need this
+
+% shorthand for "Oliver Wyman" text
+\newcommand{\ow}{Oliver Wyman}
+
+% default font family
+\renewcommand*\familydefault{\sfdefault}
+
+% color palette
+\definecolor{MMCBlue}{rgb}{0, 0.17254902, 0.466666667}
+\definecolor{MMCTurq}{rgb}{0.0000000, 0.541176471, 0.7019608}
+\definecolor{MMCLtTurq}{rgb}{0.6156863, 0.8784314, 0.9294118}
+\definecolor{MMCGold}{rgb}{0.88627451, 0.59607843, 0.08235294}
+\definecolor{MMCLtOrange}{rgb}{1.0000000, 0.8117647, 0.5372549}
+\definecolor{MMCGray25}{rgb}{0.7490196, 0.7490196, 0.7490196}
+
+
+\pagestyle{fancy} % allows use of fancyhdr commands
+\fancyheadoffset{0.45cm} % makes header wider
+\renewcommand{\headrulewidth}{0pt}%{0.4pt} % removes horizontal line under header
+
+\def\hrulefill{\leavevmode\leaders\hrule height 2pt\hfill\kern\z@}
+
+%%%being note 1: formatting of sections.  uses titlesec package
+\titleformat{\section}[display]{
+  \color{MMCTurq} 	
+  \fontsize{36}{42}\selectfont
+}  %format
+{\thesection} %label
+{0pt}
+{\hrule height 2pt
+ 	%\bigskip
+ 	\fontsize{18}{30}\selectfont
+ 	\color{MMCBlue}
+}{}
+%%%end note 1
+ 
+\newcommand{\owsection}{
+	\clearpage
+ 	\vspace*{0.5in}
+ 	\section}
+ 
+% First Page Footer
+\fancyfoot[R]{\small Page \thepage\\}
+\fancyfoot[C]{}
+\fancyfoot[L]{\color{MMCTurq}\small\MakeUppercase\ow}
+ 
+ 
+ 
+\setlength{\headsep}{1.5in}
+
+%\endinput

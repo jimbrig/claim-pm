@@ -1,0 +1,36 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage{owreport}
+\usepackage{enumitem} % for description lists
+\usepackage[toc,page]{appendix}
+% hyperref should always be the last package loaded in your .rnw document
+\usepackage{hyperref} %Andy: references \href \url
+
+%Andy: options for hyperref package
+\hypersetup{
+    colorlinks = true,
+    allcolors = blue
+}
+
+
+% You can enter the below lowercase - they are converted to
+% All uppercase
+\newcommand{\rpt}{CLAIM STATUS AND PAYMENT}
+\newcommand{\shortclient}{A PREDICTIVE MODELING EXAMPLE}
+\fancyhead[R]{\small\MakeUppercase{\shortclient}}
+\fancyhead[L]{\small\MakeUppercase{\rpt}}
+
+% NOTE USE \owsection instead of section in this document}
+
+\setcounter{section}{0} % Note your first section will be this + 1 the 
+\setcounter{page}{1} % Note your first page will be this (not + 1)
+%  The section macro increments the page macro does not on first call
+
+% set the title page geometry.  must be set outside of document for some reason
+\newgeometry{top=.75in, bottom=0in, left=1in, right=1in}
+\usepackage{Sweave}
+\begin{document}
+\input{claim-pm-concordance}
+\input{title-page}
+% set geometry for the rest of the report
+\newgeometry{top=.75in, bottom=1.0in, left=1in, right=1in}
+

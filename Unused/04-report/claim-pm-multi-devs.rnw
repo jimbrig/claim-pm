@@ -1,0 +1,687 @@
+\documentclass[11pt,letterpaper]{article}
+\usepackage{owreport}
+\usepackage{enumitem} % for description lists
+\usepackage[toc,page]{appendix}
+% hyperref should always be the last package loaded in your .rnw document
+\usepackage{hyperref} %Andy: references \href \url
+
+%Andy: options for hyperref package
+\hypersetup{
+    colorlinks = true,
+    allcolors = blue
+}
+
+
+% You can enter the below lowercase - they are converted to
+% All uppercase
+\newcommand{\rpt}{CLAIM STATUS AND PAYMENT}
+\newcommand{\shortclient}{A PREDICTIVE MODELING EXAMPLE}
+\fancyhead[R]{\small\MakeUppercase{\shortclient}}
+\fancyhead[L]{\small\MakeUppercase{\rpt}}
+
+% NOTE USE \owsection instead of section in this document}
+
+\setcounter{section}{0} % Note your first section will be this + 1 the 
+\setcounter{page}{1} % Note your first page will be this (not + 1)
+%  The section macro increments the page macro does not on first call
+
+% set the title page geometry.  must be set outside of document for some reason
+\newgeometry{top=.75in, bottom=0in, left=1in, right=1in}
+\begin{document}
+\input{title-page}
+% set geometry for the rest of the report
+\newgeometry{top=.75in, bottom=1.0in, left=1in, right=1in}
+
+<<options, echo = FALSE>>=
+# set this to TRUE or FALSE depending on whether or not you want the R
+# code in the chunks to be displayed in the generated pdf
+opts_chunk$set(echo = TRUE) # #D3D3D3
+
+# turn off scientific notation
+options(scipen=999)
+@
+
+\owsection{Executive Summary}
+\subsection{Purpose and Scope}
+
+This report describes a model for predicting incremental paid losses on an individual claim basis (``The Model'').  The model uses a mixture of predictive modeling and simulation techniques to mimic real world claim development.
+
+In the spirit of mimicing the real world, this report communicates the model through a working example using real data.  This implementation of the model is trained using FedEx Ground Auto Liability claims. The output is specific to FedEx Ground Auto Liability, but the modeling techniques are generalizable to other insurance lines of business and risk portfolios.
+
+For transparency and to aid interested individuals, we provide this report both with and without inline \textsf{R} code.  The \textsf{R} savy reader can run the inline \textsf{R} code to reproduce our output, apply the model to other datasets, and expand and improve upon the model. 
+
+The model is only applicable to reported claims.  IBNR claim predictions are beyong the scope of this model.
+
+\subsection{Background}
+
+Models, by definition, use simplified assumptions of reality to reveal information hidden in the underlying data.  Models which closely mimic the fundamental forces driving the data have the best chance of providing valuable insights.  
+
+Due to data and computing limitations, actuaries have traditionally aggregated loss information by policy, accident, or calendar period to project future losses.  By aggregating losses, the actuary loses valuable claim level information.
+
+The model assumes that individual claims and their claim level characteristics are the fundamental drivers of future payments. Although this assumption is not infallable, we believe it to be far superior to the aggregated loss assumption employed in traditional actuarial reserving.
+
+In accordance with the philosophy that the best models are those which mimic reality most closely, the model uses all available information on an individual claim level, and runs statistically rigorous techniques to fit and simulate individual claim development.
+
+\owsection{Vocabulary}
+
+We use the following terms in an attempt to make our analysis less ambiguous:
+
+\begin{itemize}
+\item Variable any 
+\item Current used as
+\item Response prefix for the response 
+\end{itemize}
+
+\owsection{Data}
+
+We are using data from fiscal years 2003 to 2016.  Fiscal years begin at 6/1 of the year prior to the fiscal year and end at 5/31 of the fiscal year (i.e. fiscal year 2003 includes claims which occurred between 6/1/2002 and 5/31/2003). The claims are evaluated at 11/30 of each year from 2002 to 2015.  
+
+We created a large dataset containing all the data used in fitting our model and making predictions from our model.  The original data and the script used to prepare the data set used in this report is located in the \verb|data/|~ directory. 
+
+<<load_data, message=FALSE>>=
+library(dplyr, warn.conflicts = FALSE)
+library(tidyr)
+library(caret, warn.conflicts = FALSE)
+library(mgcv)
+library(lubridate)
+library(ggplot2, warn.conflicts = FALSE)
+library(xtable)
+
+# load data
+claims <- readRDS("../00-data/model-claims.RDS")
+devt_periods <- c(18, 30)
+
+devt_periods_needed <- seq(6, devt_periods[length(devt_periods)] + 12, by = 12)
+claims <- filter(claims, devt %in% devt_periods_needed)
+@
+
+In this report, the model is fit to claims at age \Sexpr{devt_periods}.  These model fits can be used to predict claims at \Sexpr{devt_periods + 12} respectively.  Because this example does not model all development periods, only claim level information available for the following claims is used:
+
+<<data_triangle, results="asis">>=
+claims_tri <- dplyr::mutate(claims, 
+                     claim_count = 1,
+                     fiscal_year = year(eval) - (devt / 12) + 1.5) %>%
+                dplyr::select(fiscal_year, devt, claim_count) %>%
+                dplyr::group_by(fiscal_year, devt) %>%
+                dplyr::summarise(claim_count = sum(claim_count))
+
+claims_tri <- spread(claims_tri, key = devt, value = claim_count)
+
+claims_tri$fiscal_year <- as.character(claims_tri$fiscal_year)
+names(claims_tri)[1] <- "Fiscal Year"
+
+claims_tri_out <- xtable(claims_tri, 
+                         digits = 0)
+caption(claims_tri_out) <- "Reported Claim Count Triangle"
+
+print(claims_tri_out,
+      format.args = list(big.mark = ","),
+      include.rownames = FALSE)
+@
+
+\owsection{Model Overview}
+
+The following is a high level overview of the model:
+\begin{enumerate}
+\item Fit claim closure probability model
+\item Fit zero payment probability model
+\item Fit incremental payment model
+\item Simulate status using claim closure model from item (1)
+\item Simulate whether claim had positive incremental payments or zero incremental payments using the zero payment model from item (2) and status simulated in item (4)
+\item Apply simulated results from item (5) to incremental payment model
+\end{enumerate}
+
+\owsection{Claim Closure Model}
+
+\subsection{Model Assumptions}
+
+We use a logistic regression with center, scale, and Yeo-Johnson transformations applied to all continuous predictor variables.  We are modeling the following variables:
+
+\subsubsection{Response Variable}
+
+\begin{description}[align=left]
+  \item [status\_act] Claim status 12 months after current time
+\end{description}
+
+\subsubsection{Predictor Variables}
+
+\begin{description}[align=left]
+  \item [status\_1\_0] Factor variable with 4 levels (C, O\_C, O\_O, and NA\_O).  Each level indicates the claims lag status and current status.
+    \item [suit\_lag\_group] Factor variable with 5 levels (NS, lag\_12, lag\_18, lag\_24, lag\_30) indicating the suit report lag.  NS indicated no suit, lag\_12 indicates a suit date withing 12 months of the date of loss, lag\_18 indicated a suit date between 12 and 18 months, and so on.  All suit lags greater than 24 months are included in the lag\_30 level.
+  \item [bi\_rx] Current bodily injury case reserve dollar value.
+  \item [bi\_pd] Current bodily injury paid loss dollar value.
+  \item [bi\_rx] Current expense case reserve dollar value.
+  \item [bi\_pd] Current expense paid loss dollar value.
+  \item [tot\_rx\_incr] Current total incremental case reserve dollar value.
+  \item [tot\_pd\_incr] Current total incremental paid loss dollar value.
+\end{description}
+
+\subsection{Data Preparation}
+
+R code:
+
+<<cm_data_prep>>=
+# we don't need incremental payments for the closure model
+cm_data <- dplyr::select(claims, -tot_pd_incr_act)
+
+cm_data$status_1_0 <- ifelse(cm_data$status == "C", 
+                             "C", 
+                             paste0(cm_data$status_1, "_" , 
+                                    cm_data$status))
+cm_data$status_1_0 <- as.factor(cm_data$status_1_0)
+
+# don't want to look at claims w/o future dev info
+cm_model_data <- dplyr::filter(cm_data, eval != "2015-11-30") %>%
+                   dplyr::select(-status, -status_1, -eval)
+@
+
+\subsection{Model Fit}
+
+The model fit uses 10-fold cross validation to optimize coefficient estimation and a step wise Akaiki Information Critereon algorithm for feature selection.
+
+<<cm_model_fit, cache=TRUE, message=FALSE, warning=FALSE>>=
+# function for fitting closure model
+model_closure <- function(data, devt) {
+  # filter for development time to model and drop 'devt' and 'claim_number' columns
+  sample <- data[data$devt == devt, setdiff(names(data), c("devt", "claim_number"))]
+  
+  caret::train(status_act ~ ., 
+               data = sample,
+               method = "glmStepAIC",
+               trace = FALSE,
+               preProcess = c("center", "scale", "YeoJohnson"),
+               trControl = trainControl(method = "repeatedcv", repeats = 10))
+  
+}
+
+closure_models <- lapply(devt_periods, model_closure, data = cm_model_data)
+@
+
+<<cm_summary, results = "asis">>=
+cm_summary <- vector("list", length = length(closure_models))
+for (i in seq_along(closure_models)) {
+  cm_summary[[i]] <- closure_models[[i]]$results[, -1]
+}
+
+cm_summary <- dplyr::bind_rows(cm_summary)
+
+cm_summary <- data.frame(as.factor(devt_periods), cm_summary)
+
+cm_summary_out <- xtable(cm_summary, digits = 5)
+names(cm_summary_out)[1] <- "Model Development"
+
+print(cm_summary_out,
+      include.rownames = FALSE)
+@
+
+For a more detailed statistical summary of the claim closure model fits see Appendix~\ref{cm_summary}
+
+<<cm_prob, warning=FALSE, message=FALSE>>=
+cm_probs <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  my_data <- cm_model_data[cm_model_data$devt == devt_periods[i], ]
+  cm_probs[[i]] <- cbind(my_data, predict(closure_models[[i]], newdata = my_data, 
+                                          type = "prob"))
+  cm_probs[[i]]$logits <- log(cm_probs[[i]]$O / cm_probs[[i]]$C)
+  rm(my_data)
+}
+@
+
+In the plots below the blue line indicates the fitted probability of the claim being open in 12 months.  The red dots at the top and bottom are the actual status in 12 months.  (i.e. Our model uses the blue line to predict the red dots)
+
+<<cm_plots, fig.height=3, warning=FALSE>>=
+cm_plot <- function(data, devt) {
+  
+  data$status_act <- ifelse(data$status_act == "C", 0, 1)
+  
+  ggplot(data, aes(x = logits, y = status_act)) +
+         geom_point(colour = "red", 
+                    position = position_jitter(height = 0.1, width = 0.1),
+                    size = 0.5,
+                    alpha = 0.2) + 
+         geom_smooth(method = "glm", method.args = list(family = "binomial"), 
+                     size = 1) + 
+         ylab("Probability Open") +
+         xlab("Logit Odds") +
+         ggtitle(paste0("Age ", devt, " Months Claim Closures Probabilities"))
+}
+
+
+cm_plot(data = cm_probs[[1]], devt = devt_periods[1])
+cm_plot(data = cm_probs[[2]], devt = devt_periods[2])
+@
+
+\owsection{Zero Payment Model}
+
+\subsection{Model Assumptions}
+
+The zero payment model is similar to the claim closure model in that we are looking at a binomial response variable.  We are modeling whether the claim has zero or nonzero incremental payments.
+
+We are removing all claims that have a current status of closed and a response status of closed.  We assume that all of these claims will ultimatly have zero incremental payments in our final model.
+
+\subsubsection{Reponse Variable}
+
+\begin{description}[align=left]
+  \item [zero] Factor indicating whether the claim had zero or nonzero incremental payments between current time and 12 months after current time.
+\end{description}
+
+\subsubsection{Predictor Variables}
+
+\begin{description}[align=left]
+  \item [status\_0\_act] Factor variable with 3 levels (C\_O, O\_C, and O\_O).  Each level indicates the current claim status and the actual status at the time that the of the reponse.
+  \item [suit\_lag\_group] Factor variable with 3 levels (NS, lag\_12, and lag\_18) indicating the suit report lag.  NS indicated no suit and lag\_12 indicates a suit date withing 12 months of the date of loss. All suit lags greater than 24 months are included in the lag\_18 level.
+  \item [bi\_rx] Current bodily injury case reserve dollar value.
+  \item [bi\_pd] Current bodily injury paid loss dollar value.
+  \item [bi\_rx] Current expense case reserve dollar value.
+  \item [bi\_pd] Current expense paid loss dollar value.
+  \item [tot\_rx\_incr] Current total incremental case reserve dollar value.
+  \item [tot\_pd\_incr] Current total incremental paid loss dollar value.
+\end{description}
+
+
+\subsection{Data Prep}
+
+<<zm_data_prep>>=
+# prep data specifically for closure model
+# adjust levels of suit_lag_group.  Removing insignificant levels
+zm_data <- claims
+zm_data$suit_lag_group <- as.character(zm_data$suit_lag_group)
+zm_data$suit_lag_group <- ifelse(zm_data$suit_lag_group %in% c("lag_24", "lag_30"),
+                                 "lag_18",
+                                 zm_data$suit_lag_group)
+zm_data$suit_lag_group <- as.factor(zm_data$suit_lag_group)
+zm_data$suit_lag_group <- relevel(zm_data$suit_lag_group, ref = "NS")
+
+# zm data to fit model
+zm_model_data <- dplyr::filter(zm_data, eval != "2015-11-30") 
+
+# remove all claims that have a closed closed status from the data
+# these will be set to incremental payments of 0
+zm_model_data <- filter(zm_model_data, status == "O" |  status_act == "O")
+
+#Add in status_0_act factor:
+zm_model_data$status_0_act <- factor(paste0(zm_model_data$status, "_" , 
+                                            zm_model_data$status_act))
+
+#Add in response variable for zero payment:
+zm_model_data$zero <- factor(ifelse(zm_model_data$tot_pd_incr_act == 0, 
+                                    "Zero", "NonZero"))
+
+#Remove unnecessary columns:
+zm_model_data <-  dplyr::select(zm_model_data, -status_act, -status, -status_1, 
+                                -tot_pd_incr_act, -eval)
+@
+
+\subsection{Model Fit}
+
+We are using the same data prepared for the claim closure model to fit our zero payment model.
+
+<<zm_model_fit, cache=TRUE, message = FALSE, warning = FALSE>>=
+
+# function for fitting zero model
+model_zero_pmnt <- function(data, devt) {
+  
+  # filter for development time to model and drop 'devt' column
+  sample <- data[data$devt == devt, setdiff(names(data), c("devt", "claim_number"))]
+  
+  caret::train(zero ~ ., 
+               data = sample,
+               method = "glmStepAIC",
+               trace = FALSE,
+               preProcess = c("center", "scale", "YeoJohnson"),
+               trControl = trainControl(method = "repeatedcv", repeats = 10))
+} 
+
+zero_models <- lapply(devt_periods, model_zero_pmnt, data = zm_model_data)
+@
+
+<<zm_summary, results = "asis">>=
+zm_summary <- vector("list", length = length(zero_models))
+for (i in seq_along(zero_models)) {
+  zm_summary[[i]] <- zero_models[[i]]$results[, -1]
+}
+
+zm_summary <- dplyr::bind_rows(zm_summary)
+
+zm_summary <- data.frame(as.factor(devt_periods), zm_summary)
+
+zm_summary_out <- xtable(zm_summary, digits = 5)
+names(zm_summary_out)[1] <- "Model Development"
+
+print(zm_summary_out,
+      include.rownames = FALSE)
+@
+
+<<zm_prob, warning=FALSE, message=FALSE>>=
+zm_probs <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  my_data <- zm_model_data[zm_model_data$devt == devt_periods[i], 
+                           setdiff(names(zm_model_data), c("devt", "claim_number"))]
+  zm_probs[[i]] <- cbind(my_data, predict(zero_models[[i]], newdata = my_data, 
+                                          type = "prob"))
+  zm_probs[[i]]$logits <- log(zm_probs[[i]]$NonZero / zm_probs[[i]]$Zero)
+  rm(my_data)
+}
+@
+
+In the plots below, the blue line indicates the fitted probability of the claim having a payments in the upcoming 12 month period.  The red dots at the top are the actual claims with payments, and the dots at the bottom are the claims with zero payments. (i.e. Our model uses the blue line to predict the red dots)
+
+<<zm_plots, fig.height=3, warning=FALSE>>=
+zm_plot <- function(data, devt) {
+  
+  data$zero <- ifelse(data$zero == "Zero", 0, 1)
+  
+  ggplot(data, aes(x = logits, y = zero)) +
+         geom_point(colour = "red", 
+                    position = position_jitter(height = 0.1, width = 0.1),
+                    size = 0.5,
+                    alpha = 0.2) + 
+         geom_smooth(method = "glm", method.args = list(family = "binomial"), 
+                     size = 1) + 
+         ylab("Payment Probability") +
+         xlab("Logit Odds") +
+         ggtitle(paste0("Age ", devt, " to ", devt + 12, 
+                        " Non-Zero Incremental Payment"))
+}
+
+
+zm_plot(data = zm_probs[[1]], devt = devt_periods[1])
+zm_plot(data = zm_probs[[2]], devt = devt_periods[2])
+@
+
+\owsection{Incremental Payment Model}
+
+The incremental payment model uses a Generalized 
+
+\subsection{Model Assumptions}
+
+The incremental payment model models 12 month incremental payments.  The model incremental payment model uses a generalized additive model (GAM) with a quasi-poisson log link function.
+
+\subsubsection{Response Variable}
+
+\begin{description}[align=left]
+\item [tot\_pd\_incr\_act] Total incremental payment
+\end{description}
+
+\subsubsection{Predictor Variables}
+
+\begin{description}[align=left]
+\item [status\_act] The actual status 12 months from the current time.
+\item [tot\_rx] Current total reserve dollar value
+\end{description}
+
+
+\subsection{Data Prep}
+
+R code:
+
+<<payment_data_prep>>=
+nzm_model_data <- dplyr::filter(claims, eval != "2015-11-30") %>%
+                        dplyr::select(devt, claim_number, status_act, 
+                                      tot_rx, tot_pd_incr, tot_pd_incr_act)
+                        
+
+#Take out zero pmnts:
+nzm_model_data <- nzm_model_data[nzm_model_data$tot_pd_incr_act > 0, ]
+
+# take out claims with a current reserve of zero
+weibull_model_data <- nzm_model_data[nzm_model_data$tot_rx <= 0, ]
+  
+nzm_model_data <- nzm_model_data[nzm_model_data$tot_rx > 0, ]
+@
+
+\subsection{Model Fit}
+
+
+<<nzm_model_fit>>=
+# function for fitting incremental payment model
+model_incr_pmnt <- function(data, devt) {
+  
+  # filter for development time to model and drop 'devt' column
+  sample <- data[data$devt == devt, setdiff(names(data), c("devt", "claim_number"))]
+  
+  mgcv::gam(tot_pd_incr_act ~ status_act + s(tot_rx) + s(tot_pd_incr),
+            data = sample,
+            family = quasipoisson(link = "log"))
+} 
+
+incr_pmnt_models <- lapply(devt_periods, model_incr_pmnt, data = nzm_model_data)
+@
+
+<<nzm_predict_training, warning=FALSE, message=FALSE>>=
+nzm_pred <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  my_data <- nzm_model_data[nzm_model_data$devt == devt_periods[i], 
+                           setdiff(names(nzm_model_data), c("devt", "claim_number"))]
+  nzm_pred[[i]] <- cbind(my_data, tot_pd_incr_sim = 
+                           exp(predict(incr_pmnt_models[[i]], newdata = my_data)))
+  
+  rm(my_data)
+}
+@
+
+
+
+<<nzm_plots, fig.height=3, warning=FALSE>>=
+# plots to be determined
+@
+
+We fit the Weibull distribution for all claims with zero current case reserve
+
+<<weibull_fit>>=
+# plot
+weibull_plot <-gamlss::histDist(tot_pd_incr_act, 
+                                family = "WEI3", 
+                                data = weibull_model_data, 
+                                nbins = 50)
+
+# fit
+#weibull_plot <- vector("list", length = length(devt_periods))
+weibull_fit <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  my_data <- weibull_model_data[weibull_model_data$devt == devt_periods[i], ]
+  
+  weibull_plot <-gamlss::histDist(tot_pd_incr_act, 
+                                  family = "WEI3", 
+                                  data = my_data, 
+                                  nbins = 50)
+  
+  weibull_fit[[i]] <- gamlss::gamlss(tot_pd_incr_act ~ devt + status_act + tot_pd_incr, 
+                                     sigma.formula = ~ devt + status_act + tot_pd_incr,
+                                     data = my_data,
+                                     mu.start = weibull_plot$mu,
+                                     sigma.start = weibull_plot$sigma,
+                                     family = "WEI3")
+}
+
+weibull_means <- weibull_fit[[1]]$mu.fv
+weibull_sigmas <- weibull_fit[[1]]$sigma.fv
+weibull_sims <- vector("numeric", length = length(weibull_means))
+for (i in seq_along(weibull_means)) {
+  weibull_sims[i] <- gamlss.dist::rWEI3(n = 1, mu = weibull_means[i], sigma = weibull_sigmas[i])
+}
+
+weibull_sims
+@
+
+\owsection{Simulation}
+
+\subsection{1. Closure Status}
+
+We use the probabilities returned from the closure model to simulate the status of all of our claims.
+
+<<cm_predict>>=
+set.seed(1234)
+n_sims <- 3
+
+cm_pred_data <- dplyr::filter(cm_data, eval == "2015-11-30", devt %in% devt_periods)
+cm_probs <- vector("list", length = length(devt_periods))
+cm_pred <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  cm_probs[[i]] <- cm_pred_data[cm_pred_data$devt == devt_periods[i], ]
+  cm_probs[[i]] <- cbind(cm_probs[[i]], 
+                         predict(closure_models[[i]], newdata = cm_probs[[i]], 
+                         type = "prob"))
+  
+  cm_pred[[i]] <- lapply(cm_probs[[i]]$O, rbinom, n = n_sims, size = 1)
+  cm_pred[[i]] <- matrix(unlist(cm_pred[[i]]), ncol = n_sims, byrow = TRUE)
+  cm_pred[[i]] <- ifelse(cm_pred[[i]] == 1, "O", "C")
+  cm_pred[[i]] <- as.data.frame(cm_pred[[i]])
+}
+@
+
+The table below shows selected age 18 claims after they had their closure probability predicted by the closure model and their status simulated using a binomial random varable.
+
+<<cm_predict_table, results = "asis">>=
+cm_out <- cm_probs[[1]]
+
+cm_out <- dplyr::select(cm_out, claim_number, status, suit_lag_group, bi_rx,bi_pd, O)
+
+cm_out$bi_pd <- "..."
+cm_out$status_sim <- cm_pred[[1]][, 1]
+cm_out <- xtable(cm_out[c(1, 6, 24, 2, 10), ])
+names(cm_out) <- c("Claim Number", "Status", "Suit Lag", "BI Case", 
+                   "Other Vars", "Prob Open", "Sim Status")
+print(cm_out,
+      include.rownames = FALSE)
+@
+
+The \verb|Prob Open| column is the probability that the age 18 claim will be open at age 30 as modeled in our closure model.  The \verb|Sim Status| column is the result of a bernoulli simuation on each of those probabilities.
+
+We are running this simulation \Sexpr{n_sims} times to simulate \Sexpr{n_sims} closure scenerios.  The simulations allow us to determine confidence intervals.
+
+\subsection{2. Zero Payment Model}
+
+Next the simulated claims with their simulated statuses have their probability of having a non zero incremental payment simulated by the zero payment model.  This probability is then simulated using the same random binomial simulation approach as used when simulating closure status.
+
+<<zm_predict_data_prep>>=
+cm_probs <- bind_rows(cm_probs)
+cm_pred <- bind_rows(cm_pred)
+# put closure model predictions together
+cm_pred <- cbind(cm_probs[, c("devt", "claim_number")], cm_pred)
+
+# gather `cm_pred` into a long data frame
+cm_pred <- tidyr::gather(cm_pred, key = "sim_num", 
+                         value = "status_sim",  -devt, -claim_number)
+
+# read in data zero model data
+zm_pred_data <- dplyr::filter(zm_data, eval == "2015-11-30", devt %in% devt_periods) %>%
+                  dplyr::select(-tot_pd_incr_act, -status_act, -status_1)
+
+# join `zm_pred_data` to predictions from closure model
+zm_pred_data <- left_join(cm_pred, zm_pred_data, by = c("devt", "claim_number"))
+
+# remove all claims that have a closed closed status from the data
+# these will be set to incremental payments of 0 
+zm_pred_data <- filter(zm_pred_data, status == "O" |  status_sim == "O")
+
+zm_pred_data$status_0_act <- paste0(zm_pred_data$status, "_", zm_pred_data$status_sim)
+#zm_pred_data[zm_pred_data$devt == 18 & zm_pred_data$claim_number == "2014275496", ]
+@
+
+<<zm_predict>>=
+# loops over devt_periods
+zm_probs <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  zm_probs[[i]] <- zm_pred_data[zm_pred_data$devt == devt_periods[i], ]
+  
+  zm_probs[[i]] <- cbind(zm_probs[[i]], 
+                         predict(zero_models[[i]], newdata = zm_probs[[i]], type = "prob"))
+  
+  zm_probs[[i]]$zero_sim_1 <- sapply(zm_probs[[i]]$NonZero, rbinom, n = 1, size = 1)
+  zm_probs[[i]]$zero_sim <- ifelse(zm_probs[[i]]$zero_sim_1 == 1, "NonZero", "Zero")
+}
+@
+
+<<zm_predict_table, results = "asis">>=
+zm_out <- zm_probs[[1]]
+
+zm_out <- dplyr::select(zm_out, claim_number, status, suit_lag_group, bi_rx, bi_pd, 
+                        status_sim, NonZero, zero_sim)
+
+zm_out$bi_pd <- "..."
+zm_out <- xtable(head(zm_out, 8))
+names(zm_out) <- c("Claim Number", "Status", "Suit Lag", "BI Case", 
+                   "Other Vars", "Sim Status", "Prob Non Zero", "Zero Sim")
+print(zm_out,
+      include.rownames = FALSE)
+@
+
+\subsection{Incremental Payment Simulation}
+
+We are only interested in predicting incremental payments for claims that were simulated to have a non zero incremental payment.  All claims that were closed in the current period and were simulated to be closed will be given an incrementa; payment of zero.  Additionally, all claims that were simulated by the Zero Payment Model to have a Zero payment will be given an incremental payment of zero.
+
+<<nzm_predict_data_prep>>=
+# similar process as cm_pred above
+zm_probs <- bind_rows(zm_probs)
+
+zm_pred <- zm_probs[, c("devt", "claim_number", "status_sim", "zero_sim")]
+
+# separate zeros from non zeros
+zero_claims <- filter(zm_pred, is.na(zero_sim) | zero_sim == "Zero")
+
+non_zero_claims <- filter(zm_pred, zero_sim == "NonZero") %>%
+                     dplyr::select(-zero_sim)
+
+# make status_act from status_sim
+names(non_zero_claims)[3] <- "status_act"
+
+nzm_pred_data <- dplyr::filter(claims, eval == "2015-11-30") %>%
+                        dplyr::select(devt, claim_number, 
+                                      tot_rx, tot_pd_incr)
+
+# take out claims with a current reserve of zero
+#nzm_pred_data <- nzm_pred_data[nzm_pred_data$tot_rx > 0, ]
+
+nzm_pred_data <- left_join(non_zero_claims, nzm_pred_data, 
+                              by = c("devt", "claim_number"))
+@
+
+<<nzm_predict>>=
+# loops over devt_periods
+nzm_pred <- vector("list", length = length(devt_periods))
+for (i in seq_along(devt_periods)) {
+  nzm_pred[[i]] <- nzm_pred_data[nzm_pred_data$devt == devt_periods[i], ]
+  
+  nzm_pred[[i]]$tot_incr_pd_fit <- exp(predict(incr_pmnt_models[[i]], newdata = nzm_pred[[i]]))
+}
+@
+
+<<nzm_predict_table>>=
+nzm_pred <- bind_rows(nzm_pred)
+head(as.data.frame(nzm_pred), 30)
+@
+
+Now we simulate incremental payments for all claims with zero case reserve using the Weibull distribution.
+
+<<weibull_data_prep>>=
+
+
+
+@
+
+
+\owsection{Conclusion}
+
+Very Nice
+
+
+\begin{appendices}
+
+\owsection{Software} \label{software}
+
+This \verb|.pdf| document was typeset using \LaTeX .  It was generated from a \verb|.rnw| file using \verb|knitr|. We used \textsf{R}, the free and open source statistical programming environment, for all the data analysis, model fitting, simulations, graphics, and data output. The \verb|caret| package was used extensively for the heavy lifting predictive modeling.  Detail of our \textsf{R} environment at the time this report was generated is available below:
+
+<<random_code>>=
+sessionInfo()
+@
+
+\owsection{Closure Model Statistics Summary} \label{cm_summary}
+
+<<>>=
+lapply(closure_models, summary)
+@
+
+\end{appendices}
+
+\end{document}

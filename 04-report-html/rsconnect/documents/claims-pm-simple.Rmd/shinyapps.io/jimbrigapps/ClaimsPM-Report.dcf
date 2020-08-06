@@ -1,0 +1,12 @@
+name: ClaimsPM-Report
+title: ClaimsPM-Report
+username:
+account: jimbrigapps
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 2620645
+bundleId: 3446578
+url: https://jimbrigapps.shinyapps.io/ClaimsPM-Report/
+when: 1595954218.90725
+asMultiple: FALSE
+asStatic: FALSE
